@@ -1,0 +1,355 @@
+Yes. For **Windows 365 from Linux**, the connectivity picture is:
+
+```text
+Linux
+  │
+  │ Entra ID authentication / resource discovery
+  ▼
+Windows 365 / AVD control plane
+  │
+  │ signed connection configuration
+  ▼
+AVD Gateway / Broker
+  │
+  ├── TCP 443  Reverse Connect   ← always establishes first
+  │
+  ├── UDP 3478 STUN             ← attempts direct Shortpath
+  │
+  └── UDP 3478 TURN             ← relayed Shortpath fallback
+  │
+  ▼
+Windows 365 Cloud PC
+       RDP session
+```
+
+The important part is that this **isn't normal `IP:3389` RDP**. Windows 365 explicitly uses outbound Reverse Connect over TCP 443; the client authenticates with Entra ID, obtains digitally signed connection configuration, connects to the AVD gateway, and the broker arranges for the Cloud PC to connect back to that same gateway. Only then does the actual RDP handshake take place. ([Microsoft Learn][1])
+
+### What this means for a Linux client
+
+A normal FreeRDP connection such as:
+
+```bash
+xfreerdp /v:cloud-pc.example.com
+```
+
+is **not sufficient for Windows 365**. There isn't a normal externally reachable RDP listener you're supposed to target. Microsoft specifically says Windows 365 doesn't use traditional inbound RDP. ([Microsoft Learn][1])
+
+Even **RDP Shortpath** doesn't solve that bootstrap problem. With public Shortpath, the session first establishes the TCP/443 Reverse Connect transport, then exchanges STUN candidates and potentially moves the RDP channels onto direct UDP. TURN is used if direct STUN connectivity fails. ([Microsoft Learn][1])
+
+For ANC/private-network Cloud PCs there's also private Shortpath using UDP/3390, but the public Reverse Connect path is still required initially. ([Microsoft Learn][1])
+
+### The supported Linux route
+
+Microsoft officially supports **Linux through the Windows 365 web client**. Chrome/Edge/Firefox on Linux can connect to a Cloud PC. ([Microsoft Learn][2])
+
+There's now a particularly useful feature for building something around that: **direct-launch URLs**.
+
+For Windows 365 Enterprise and Windows 365 Flex Dedicated you can launch a specific Cloud PC using:
+
+```text
+https://windows.cloud.microsoft/webclient/ent/<workspaceID>
+```
+
+and optionally:
+
+```text
+https://windows.cloud.microsoft/webclient/ent/<workspaceID>#loginHint=user@contoso.com
+```
+
+Microsoft documents obtaining that ID through Graph:
+
+```powershell
+Connect-MgGraph -Scopes "CloudPC.Read.All"
+
+Get-MgDeviceManagementVirtualEndpointCloudPc |
+    Format-Table DisplayName, Id
+```
+
+The URL then automatically launches the remote session rather than making the user navigate the Windows 365 portal. ([Microsoft Learn][3])
+
+That gives you a fairly practical Linux architecture:
+
+```text
+Your Linux app
+     │
+     ├── Microsoft Graph
+     │       └── enumerate Cloud PCs / metadata
+     │
+     └── launch browser
+             │
+             └── windows.cloud.microsoft/webclient/ent/<id>
+                     │
+                     └── Microsoft web RDP client
+                              │
+                              └── Windows 365
+```
+
+### If you want a **native RDP renderer**
+
+This is where things get difficult.
+
+Microsoft Graph gives you **Cloud PC management and metadata**, not the RDP transport/client implementation. ([Microsoft Learn][4]) The client has to implement substantially more than ordinary RDP:
+
+1. Entra authentication.
+2. Windows 365/AVD resource enumeration.
+3. Signed connection configuration handling.
+4. AVD gateway selection.
+5. Reverse Connect negotiation.
+6. Broker orchestration.
+7. Nested TLS transport.
+8. RDP itself.
+9. Ideally ICE/STUN/TURN and Shortpath.
+
+I don't see Microsoft documenting a **public Linux SDK for that AVD/Windows 365 client-side Reverse Connect stack**. That's the missing piece that prevents this from simply being "FreeRDP + Microsoft Graph."
+
+So if your goal is something like a **native thin-client appliance running Linux**, I would currently look at two paths:
+
+* **Supported/easiest:** Linux shell/app + Chromium + the Windows 365 direct-launch web client.
+* **Native:** investigate whether Microsoft's AVD connection configuration can be integrated into FreeRDP and what parts of the Reverse Connect/gateway protocol are publicly implementable. That's a considerably deeper engineering/reverse-integration project.
+
+If you're trying to build a **Linux thin client for Windows 365**, I can dig specifically into **FreeRDP + AVD Reverse Connect** next and map out exactly which part of the connection chain is open/documented versus proprietary.
+
+[1]: https://learn.microsoft.com/en-us/windows-365/enterprise/understanding-remote-desktop-protocol-traffic "Understanding Network Flows - Remote Desktop Protocol | Microsoft Learn"
+[2]: https://learn.microsoft.com/en-us/windows-365/end-user-access-cloud-pc?utm_source=chatgpt.com "Accessing Cloud PCs | Microsoft Learn"
+[3]: https://learn.microsoft.com/en-us/windows-app/direct-launch-urls "Access desktops and apps using direct launch URLs for Windows App in a web browser - Windows App | Microsoft Learn"
+[4]: https://learn.microsoft.com/graph/api/resources/cloudpc-api-overview?view=graph-rest-beta&utm_source=chatgpt.com "Working with Windows 365 Cloud PCs using the Microsoft Graph API - Microsoft Graph beta | Microsoft Learn"
+
+---
+
+## Revised Native Architecture (August 2026 update)
+
+After checking the current Microsoft documentation and current FreeRDP upstream, the missing pieces resolve into a **more viable native-Linux design than the original draft above suggests**.
+
+The key finding is: **you do not need to implement AVD Reverse Connect from scratch.** Modern FreeRDP already implements enough of the AVD/Windows 365 ARM-gateway path to authenticate with Entra ID, obtain gateway information, traverse the WebSocket/TCP 443 gateway, and establish an RDP session. FreeRDP users are demonstrably using this against Windows 365 Cloud PCs, and upstream has continued fixing compatibility with Microsoft's gateway service through 2026. ([GitHub][a1])
+
+### Revised native architecture
+
+```text
+Linux thin-client application
+       │
+       ├──────── Microsoft Graph
+       │              │
+       │              └── enumerate Cloud PCs
+       │                  obtain CloudPc.Id
+       │
+       ├──────── AVD resource/feed layer
+       │              │
+       │              └── signed connection configuration (.rdpw/.rdp)
+       │                      ▲
+       │                      │
+       │                 MAIN GAP
+       │
+       └──────── FreeRDP 3.x
+                      │
+                      ├── Entra/AAD authentication
+                      ├── AVD ARM gateway resolution
+                      ├── gateway/broker connection
+                      ├── WebSocket / TCP 443
+                      ├── Reverse Connect
+                      ├── RDSTLS / RDP
+                      │
+                      └── UDP Shortpath
+                             ✗ not implemented
+                             in FreeRDP today
+```
+
+Microsoft's own architecture description matches this fairly closely: after Entra authentication, the client sends its token to the AVD feed service, receives **digitally signed connection configurations**, stores them as `.rdp` files, and uses one of those configurations to establish the gateway connection. The broker then causes the session host to connect to the same gateway, after which the nested RDP/TLS session starts. ([Microsoft Learn][a2])
+
+### What is actually solved
+
+| Piece                                  | Status                                                  | Consequence                            |
+| -------------------------------------- | ------------------------------------------------------- | -------------------------------------- |
+| Entra authentication                   | **Implemented in FreeRDP**                              | Don't write this yourself              |
+| AVD ARM/gateway resolution             | **Implemented in FreeRDP**                              | Reverse-connect bootstrap is viable    |
+| TCP 443 gateway/WebSocket              | **Implemented**                                         | Native Windows 365 sessions work today |
+| RDP/RDSTLS                             | **Implemented + protocol documented**                   | Normal FreeRDP territory               |
+| Cloud PC enumeration                   | **Public Graph API**                                    | Easy application UI/discovery          |
+| Direct browser launch                  | **Public/supported API surface**                        | Excellent fallback                     |
+| Obtain signed `.rdpw` programmatically | **Weak spot**                                           | Main native-client integration problem |
+| Shortpath/UDP                          | **Protocol documented, FreeRDP missing implementation** | Native client stays on TCP gateway     |
+
+The upstream FreeRDP FAQ explicitly documents the AVD invocation pattern:
+
+```text
+<rdpw file> /gateway:type:arm /sec:aad
+```
+
+and upstream issue reports include actual Windows 365 Cloud PC `.rdpw` configurations and successful AAD/ARM negotiation. ([GitHub][a3])
+
+As of August 2026, build against **FreeRDP 3.30.0 or newer**, rather than whatever older version happens to be in a Linux distribution. 3.30.0 is the current upstream release, dated July 16, 2026, and includes further WebSocket-related fixes. ([GitHub][a4])
+
+### The real missing piece: getting the signed connection configuration
+
+This is where most of the investigation should be redirected.
+
+Microsoft publicly documents the feed-discovery URL:
+
+```text
+https://rdweb.wvd.microsoft.com/api/arm/feeddiscovery
+```
+
+and explicitly says the AVD feed returns the remote resources and digitally signed connection configuration. Microsoft also describes separate **initial feed discovery** and **workspace feed download** stages. ([Microsoft Learn][a5])
+
+What is **not** in Microsoft's public documentation is a supported third-party-client API/SDK contract that says, in effect:
+
+```text
+authenticate user
+→ enumerate Windows 365 resource
+→ download current signed .rdpw
+```
+
+with the request/response schemas and tokens documented sufficiently for an independent Linux client.
+
+That's an important distinction. The service isn't a total black box—the endpoints and architecture are visible—but the complete client-facing feed protocol does not appear to be exposed as a supported Microsoft Graph-style API.
+
+This has recently become more important because FreeRDP's own AVD FAQ now strikes out the old instruction telling users to set the web portal to **"Download the rdp file."** ([GitHub][a3])
+
+So the architecture should **not assume that a human can permanently bootstrap the product by downloading an `.rdpw` file from Microsoft's portal**.
+
+### Graph does not fill that gap
+
+Graph is still useful, but for the control plane:
+
+```text
+Graph
+  └── Cloud PCs
+       ├── displayName
+       ├── CloudPc.Id
+       ├── status
+       ├── provisioning metadata
+       └── management operations
+```
+
+The current direct-launch documentation confirms something useful: Microsoft's oddly named `<workspaceID>` for a Windows 365 direct link is simply the `Id` returned for the Cloud PC by:
+
+```powershell
+Get-MgDeviceManagementVirtualEndpointCloudPc |
+    Format-Table DisplayName, Id
+```
+
+So this part of the original proposal is confirmed. ([Microsoft Learn][a6])
+
+The current URL forms are:
+
+```text
+https://windows.cloud.microsoft/webclient/ent/<CloudPc.Id>
+```
+
+and, where needed:
+
+```text
+https://windows.cloud.microsoft/webclient/ent/<CloudPc.Id>?tenant=<tenantID>#loginHint=<UPN>
+```
+
+Microsoft updated that documentation July 9, 2026. ([Microsoft Learn][a6])
+
+But Graph's `CloudPc.Id` is **not a substitute for the signed `.rdpw` configuration needed by FreeRDP's ARM-gateway path**.
+
+### Shortpath is the other substantial gap
+
+The good news is that this isn't fundamentally a secret RDP protocol either.
+
+Microsoft publishes the Remote Desktop UDP Transport Extension, including **MS-RDPEUDP2**, which specifies the newer UDP transport used by RDP. ([Microsoft Learn][a7])
+
+And Microsoft's current Windows 365 description confirms the transport sequence:
+
+```text
+TCP/443 Reverse Connect
+        │
+        ▼
+RDP established
+        │
+        ├── try direct UDP Shortpath via STUN
+        │
+        └── otherwise UDP via TURN
+```
+
+The TCP reverse-connect channel remains available when UDP cannot be established. ([Microsoft Learn][a8])
+
+But **FreeRDP still does not have working client-side UDP multitransport**. Its long-running upstream UDP issue remains open; in March 2026 a maintainer/contributor again clarified that enabling `+multitransport` does not mean UDP actually works. An earlier maintainer explanation is even more explicit: FreeRDP tries the multitransport negotiation, waits, and falls back because "UDP never works until implemented." ([GitHub][a9])
+
+So:
+
+```text
+Windows 365 + FreeRDP today
+        │
+        └── Reverse Connect TCP/443   ✓
+
+Windows 365 + FreeRDP Shortpath
+        │
+        ├── STUN/direct UDP           ✗
+        └── TURN/relayed UDP          ✗
+```
+
+That means **Shortpath is phase 2**, not part of the minimum viable native client.
+
+### Revised product design
+
+```text
+                    Linux appliance
+                          │
+                ┌─────────┴──────────┐
+                │                    │
+         Session launcher      Cloud PC catalog
+                │                    │
+                │                 Graph API
+                │                    │
+       ┌────────┴────────┐           │
+       │                 │           │
+SUPPORTED             NATIVE         │
+FALLBACK              MODE           │
+       │                 │           │
+Chromium          resource/feed ◄────┘
+       │           integration
+       │                 │
+direct-launch        signed .rdpw
+URL                    │
+       │                 │
+Microsoft web       libfreerdp
+client                  │
+       │              AAD
+       │              ARM gateway
+       │              TCP/443
+       │              RDP
+       └────────────┬────┘
+                    │
+             Windows 365 Cloud PC
+```
+
+Do **not** spend engineering effort reimplementing the gateway, broker, RDSTLS, or reverse-connect RDP stack. FreeRDP has crossed that bridge already. The code to own is primarily the **session acquisition/control-plane layer immediately above FreeRDP**.
+
+For an engineering prototype, the first validation is consequently very small: obtain one valid Windows 365 `.rdpw` from a tenant by whatever currently available mechanism you have, then prove the target hardware/software stack against current FreeRDP using the upstream-supported AVD flags. If that performs acceptably over TCP-only, you've eliminated most of the protocol risk before touching feed discovery.
+
+The next investigation is then **AVD feed protocol → signed `.rdpw` acquisition**, not "how do we implement Reverse Connect?" That is now the single missing piece to reverse-map in detail. After that, the optional second project is implementing `[MS-RDPEMT]`/`[MS-RDPEUDP2]` Shortpath support in FreeRDP. ([Microsoft Learn][a2])
+
+In one sentence: **a native Linux Windows 365 thin client now looks technically realistic using FreeRDP, but productionizing it hinges on reliably acquiring Microsoft's signed AVD connection configuration, while UDP Shortpath remains a separate FreeRDP development project.**
+
+## Roadmap
+
+The sequencing above resolves into three explicit phases. UDP Shortpath is on the roadmap as a distinct **Phase 2**, not part of the MVP.
+
+**Phase 0 — Supported fallback (ship first)**
+- Linux shell/app + Chromium + Windows 365 direct-launch web client.
+- Microsoft Graph for Cloud PC enumeration and metadata (`CloudPc.Id` → direct-launch `<workspaceID>`).
+- Lowest risk; entirely on supported/public API surface.
+
+**Phase 1 — Native MVP (TCP-only)**
+1. Validate the target hardware/software stack against **FreeRDP 3.30.0+** using upstream-supported AVD flags (`<rdpw file> /gateway:type:arm /sec:aad`) with one manually-obtained `.rdpw`.
+2. If TCP-only performance is acceptable, reverse-map the **AVD feed protocol → programmatic signed `.rdpw` acquisition** (feed-discovery `https://rdweb.wvd.microsoft.com/api/arm/feeddiscovery`, initial-feed-discovery vs workspace-feed-download stages).
+- This `.rdpw` acquisition is the critical-path missing piece; everything below it in the stack (AAD, ARM gateway, TCP/443 reverse connect, RDP/RDSTLS) is already handled by FreeRDP.
+
+**Phase 2 — UDP Shortpath (separate project)**
+- Implement `[MS-RDPEMT]` / `[MS-RDPEUDP2]` client-side UDP multitransport in FreeRDP: direct Shortpath via STUN, relayed fallback via TURN.
+- Until this lands, the native client stays on the TCP/443 reverse-connect gateway. Explicitly optional and decoupled from Phase 1 delivery.
+
+### Additional references (August 2026 update)
+
+[a1]: https://github.com/FreeRDP/FreeRDP/issues/11951?utm_source=chatgpt.com "Azure Cloud PC/AVD RD Gateway sometimes rejects `FreeRDP` · Issue #11951 · FreeRDP/FreeRDP"
+[a2]: https://learn.microsoft.com/en-us/azure/virtual-desktop/network-connectivity?utm_source=chatgpt.com "Understanding Azure Virtual Desktop network connectivity - Azure | Microsoft Learn"
+[a3]: https://github.com/freerdp/freerdp/wiki/FAQ?utm_source=chatgpt.com "FAQ · FreeRDP/FreeRDP Wiki · GitHub"
+[a4]: https://github.com/FreeRDP/FreeRDP/releases?after=2.3.2&utm_source=chatgpt.com "Releases · FreeRDP/FreeRDP · GitHub"
+[a5]: https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-remotedesktop?utm_source=chatgpt.com "RemoteDesktop Policy CSP | Microsoft Learn"
+[a6]: https://learn.microsoft.com/en-us/windows-app/direct-launch-urls?utm_source=chatgpt.com "Access desktops and apps using direct launch URLs for Windows App in a web browser - Windows App | Microsoft Learn"
+[a7]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpeudp2/e7c5f83e-6574-4f10-90b0-f51b6f72c752?utm_source=chatgpt.com "[MS-RDPEUDP2]: Introduction | Microsoft Learn"
+[a8]: https://learn.microsoft.com/en-us/windows-365/enterprise/understanding-remote-desktop-protocol-traffic?utm_source=chatgpt.com "Understanding Network Flows - Remote Desktop Protocol | Microsoft Learn"
+[a9]: https://github.com/FreeRDP/FreeRDP/issues/4978?utm_source=chatgpt.com "UDP support for Freerdp · Issue #4978 · FreeRDP/FreeRDP"
