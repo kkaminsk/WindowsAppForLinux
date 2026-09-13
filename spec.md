@@ -24,11 +24,12 @@ The application provides:
 In scope: an end-user client. Out of scope: admin-console functionality (provisioning policies, tenant
 management), although actions that require admin capability are noted where they intersect the end-user UI.
 
-This specification is **language- and UI-toolkit-agnostic**: neither is committed here, and authentication is
-specified at the protocol level (OAuth 2.0) with candidate libraries noted. Two implementation choices *are*
-committed, because they constrain the rest of the design: the **FreeRDP integration mode** (section 5.1.1) and
-the **packaging model** (section 5.8). The language/toolkit decision is scheduled as a gate before Stage 2
-(section 11).
+Sections 1–10 are written at the **protocol and behavior level** rather than against an implementation stack, and
+authentication in particular is specified as OAuth 2.0 rather than as library calls — so those sections stay valid if
+the stack changes. The stack itself **is** decided, because the rest of the design depends on it: **Python 3 +
+GTK4/libadwaita** (D-16), **MSAL Python** (D-17), an **asyncio concurrency model** (D-18), a **FreeRDP subprocess**
+(D-1, section 5.1.1) and **Flatpak packaging** (D-3, section 5.8). Every one carries a revisit trigger in the
+decision register (section 14).
 
 Functional requirements are numbered **FR-1 … FR-5** (section 3), each with numbered acceptance criteria
 (`FR-n-AC-m`) that define done. The delivery roadmap (section 11) maps every requirement and criterion onto
@@ -583,11 +584,15 @@ fractional scaling, and per-monitor DPI are **deferred** with no Phase 1 commitm
 FreeRDP 3's client backends do not all treat Wayland as a first-class target, and sessions commonly run through
 XWayland with the scaling and input-grab caveats above.
 
-**Which FreeRDP client backend the product ships against (X11 vs SDL vs any Wayland-native client) is decided at
-Gate STACK** (section 11.1), not at Stage 3. It cannot be deferred later than that: section 5.8 has to name a
-specific binary in the Flatpak manifest, so packaging work is blocked until the choice is made. Confirming the
-backend's *behavior* — the limitations tabulated above — remains a Stage 3 verification task. The decision and the
-verification are different things, and only the second one waits. The Wayland limitations above must appear in user-facing
+**The product ships against `xfreerdp`, the X11 client** (decision **D-20**, section 14.1).
+
+One consequence follows directly, and it makes the table above stronger than a snapshot: `xfreerdp` is an X11 client, so
+**on a Wayland session the RDP window always runs through XWayland**. There is no native-Wayland path with this
+backend. The limitations listed above are therefore the *permanent* Phase 1 position rather than a temporary state
+pending better Wayland support — and the route to changing them is switching backend (to SDL), not waiting.
+
+Confirming the backend's *behavior* — the specific limitations tabulated above, measured rather than assumed — remains a
+Stage 3 verification task. The decision and the verification are different things, and only the second one waits. The Wayland limitations above must appear in user-facing
 documentation, because they present as "the client is broken" otherwise.
 
 ### 5.7 Non-functional requirements
@@ -624,7 +629,7 @@ NFR-7 baseline.
 
 | Format | Status | Notes |
 | --- | --- | --- |
-| Flatpak | **Primary** | Bundles FreeRDP ≥ 3.30.0; single cross-distro artifact |
+| Flatpak | **Primary** | Bundles **`xfreerdp`** ≥ 3.30.0 (D-20) and its X11 dependencies; single cross-distro artifact |
 | `.deb` / `.rpm` | Secondary | Hard dependency on FreeRDP ≥ 3.30.0; ships only where that is satisfiable |
 | AppImage | Not planned | — |
 | Distro-packaged FreeRDP | Not relied upon | Runtime check (NFR-8) disables the native path when below the floor |
@@ -639,6 +644,7 @@ NFR-7 baseline.
 | Audio out / microphone | Audio socket | Standard |
 | Camera, smartcard | Device / PC/SC access | Contributes to those being deferred in 5.5 |
 | USB redirection | — | **Not grantable**; the reason USB is out of scope |
+| Native session display | **X11 socket** (`--socket=x11`, or `fallback-x11` plus `wayland`) | Required by D-20's X11 client. On Wayland hosts the session runs through XWayland (§5.6). Verify this is grantable — without it the Flatpak can sign in but cannot open a native session |
 
 **Verification task (Stage 1.5):** confirm each portal cost above against a real Flatpak build before the stack
 decision is finalized. Any that proves harder than stated removes a capability from section 5.5, and that trade is
@@ -1105,10 +1111,12 @@ Two gates sit between stages and are **blocking**:
 
 - **Gate CA (pre-Stage 0)** — establish whether the pilot tenant enforces device-based Conditional Access. If it
   does, Stage 0's result cannot be interpreted (section 6.5).
-- **Gate LG-1 (between Stage 0 and Stage 1)** — legal review, owner **`<TBD — assign before Stage 0 completes>`**.
-  Written position required on both exposures: reuse of the first-party AVD client ID, and traffic capture against
-  Microsoft services as the Stage 1 method. A negative position sends the project to web-only or to waiting on
-  upstream; it does not get worked around (section 12).
+- **Gate LG-1 (between Stage 0 and Stage 1)** — legal review. **Owner: Kevin Kaminski (interim).** Written position
+  required on both exposures: reuse of the first-party AVD client ID, and traffic capture against Microsoft services
+  as the Stage 1 method. A negative position sends the project to web-only or to waiting on upstream; it does not get
+  worked around (section 12). *Interim* means the gate has an owner and can therefore be cleared, not that the
+  position is legally reviewed — escalate to qualified counsel before the project distributes a build or reuses the
+  first-party client ID in a shipped artifact.
 - **Gate STACK (Stage 1.5, before Stage 2 code)** — language/toolkit decision record, evaluated against MSAL
   support quality on Linux, secret-service bindings, the Flatpak portal costs of section 5.8, the subprocess
   integration mode of section 5.1.1, and contributor availability. Three further decisions are made here because
@@ -1148,7 +1156,7 @@ gates.
   **Timebox: 3 working days, hard.** On expiry without a usable feed token, outcome 3 applies automatically — the
   project **commits to a web-only MVP** rather than extending the spike. This is decided in advance precisely so it
   is not relitigated under sunk-cost pressure on day 4: a spike that has not produced an HTTP 200 in three days has
-  produced its answer. Decision owner **`<TBD — assign before start>`**.
+  produced its answer. **Decision owner: Kevin Kaminski.**
 
   Prerequisite: Gate CA. Exit: a one-page finding naming the working identity, scope and consent path. No product
   code.
@@ -1376,6 +1384,10 @@ reversing one is a deliberate act with a stated cause rather than a drift.
 | **D-3** | **Flatpak is the primary distribution format** (§5.8) | The only routine answer to §2.2's FreeRDP ≥ 3.30.0 floor, which requires bundling | Portal costs prove worse than §5.8 asserts |
 | **D-4** | Feed TLS validates against the **system trust store; certificate pinning is rejected** (§10.1) | Pinning fails closed under the corporate TLS inspection this client's target enterprises routinely run — it would cost more users than it protects | Microsoft publishes a stable pin set, or same-CA feed tampering is observed in practice |
 | **D-5** | Connection configs are re-fetched on **first launch per resource per session**, then cached in memory; never persisted (§5.2) | Resolves the NFR-3 budget against the no-persistence rule at zero security cost — the cache is already process-scoped | The Stage 1 staticness test passes, which would permit a stated TTL |
+| **D-16** | **Python 3 + GTK4/libadwaita** via PyGObject | D-1's subprocess launcher removed the only hard pull toward a compiled language, leaving speed-to-working-client as the deciding factor — which matters under D-14's 3-day spike, since the Stage 0 script grows into the auth layer rather than being thrown away. GTK4 also has the strongest Flatpak story, which D-3 already depends on, and PyGObject gives UI and libsecret through one binding layer | **NFR-1 (≤ 2 s cold start) or NFR-4 (≤ 250 MB RSS) fail on measurement** — PyGObject startup is not free and neither is assumed to pass. Fallback: .NET + Avalonia + MSAL.NET, accepting a less native Linux feel for a single-file publish |
+| **D-17** | **MSAL Python**, with `msal-extensions` for the persisted cache | Follows from D-16. `msal-extensions` supplies a keyring-backed cache with cross-process locking — the one place a library answers §6.3's concurrency requirement instead of the application writing it. Reimplementing token refresh is a bad place to be original | Its current Linux/libsecret behavior fails verification (BIG-240), in which case the application supplies single-flight and locking itself as §6.3 already requires |
+| **D-20** | The native launcher runs **`xfreerdp`**, FreeRDP's X11 client (§5.6) | More mature than the SDL client and the richest redirection support, which matters because §5.5's channel set is the user-visible half of the product. SDL's advantage is a native-Wayland path, and §5.6 defers native Wayland — so that advantage buys nothing in Phase 1 while costing maturity now. The engine itself was never open: D-1 and §5.2 record FreeRDP as the only open-source stack with working AVD ARM-gateway support | Native Wayland becomes a Phase 1+ target, or `xfreerdp` proves deficient on a §5.5 channel the product needs — in either case the migration is to the SDL client, not to a different engine |
+| **D-18** | **Single asyncio event loop**; per-account task groups keyed by home account ID; blocking keyring and subprocess calls in a thread executor | Follows from D-16. Task groups give FR-3-AC-2's cancellation-on-account-switch directly, and a per-account lock plus shared in-flight future gives §6.3 single-flight. GTK application uniqueness supplies FR-4-AC-7 nearly free | Cancellation proves insufficient for in-flight Graph actions rather than just enumeration |
 
 ### 14.2 Identity and security
 
@@ -1396,15 +1408,18 @@ reversing one is a deliberate act with a stated cause rather than a drift.
 | **D-12** | Project licensed **Apache-2.0** | Aligns with FreeRDP for the Phase 1.5 upstreaming goal; an unlicensed repository cannot contribute code anywhere | — |
 | **D-13** | Persisted state is **JSON under `XDG_STATE_HOME` with a `schemaVersion` per store** and forward-only migrations; tokens remain in the keyring (§6.3) | Migration path exists from version 0, avoiding a future "sign in again and lose your settings" release | A store outgrows flat files |
 | **D-14** | **Stage 0 is timeboxed to 3 working days.** On expiry without a usable feed token, the project commits to a **web-only MVP** (§11.1) | Decided in advance so it is not relitigated on day 4. A spike with no HTTP 200 in three days has produced its answer | — |
+| **D-19** | **Kevin Kaminski creates and owns the multi-tenant Entra app registration** (§6.1). The registration's home tenant, its recovery path, and its location are recorded at creation (Stage 0, day 1) | A distributable product needs a registration someone owns, and the owner question does not depend on the Stage 0 branch — so it is answered now rather than waiting. **Critical constraint: an Entra app registration cannot be transferred between tenants.** The home tenant chosen at creation is fixed for the life of that client ID, and the client ID ships inside every binary — so relocating later means a new client ID and a forced update for every installed client | Never for the existing client ID — it cannot move. A change of home tenant is a **new registration and a breaking release**, so it happens only if ownership must transfer (the project becoming an organization or community project) and is planned as a release, not a migration |
+| **D-15** | The initial effort is a **5-working-day feasibility sprint**, not a Phase 0 delivery: 3 days of Stage 0 (D-14) plus 2 days of skeleton on whichever branch results, then **re-plan with the finding in hand** | Five days answers the question that governs every later estimate. It is explicitly **not** enough for Phase 0 as specified in §11 — multi-account (FR-3), the full token state machine (FR-4), management actions (FR-5) and Flatpak packaging are all outside it. Recording the scope prevents "five-day sprint" being misread later as "Phase 0 in five days" | Re-plan at sprint close. Phase 0's own scope is unchanged by this decision — only the sequencing |
 
 ### 14.4 Open — not yet decided
 
 | Question | Blocking | Owner |
 | --- | --- | --- |
-| Gate LG-1 legal-review owner | E-7, E-10, and therefore all of Stage 1 | **`<TBD>`** |
-| Stage 0 decision owner | Stage 0 exit | **`<TBD>`** |
-| Language, UI toolkit, auth library, FreeRDP client backend, cancellation model | Stage 2 code and Flatpak packaging | Gate STACK |
-| Multi-tenant app registration ownership | Distribution; partly dependent on the Stage 0 branch | **`<TBD>`** |
+| ~~Gate LG-1 legal-review owner~~ — **assigned: Kevin Kaminski (interim)**, §11.1. Escalation to qualified counsel still open before any distributed build | — | Kevin Kaminski |
+| ~~Stage 0 decision owner~~ — **assigned: Kevin Kaminski**, §11.1 | — | Kevin Kaminski |
+| ~~FreeRDP client backend~~ — **decided: `xfreerdp`** (D-20). **Gate STACK's decisions are now complete** | — | Settled |
+| Gate STACK **verifications**, all that remain of the gate: `msal-extensions` locking on Linux (V1), Flatpak portal/proxy/X11-socket exposure (V2), NFR-1/NFR-4 measured against PyGObject (V3). These *confirm or overturn* rather than decide | D-16, D-17, D-3 each carry a revisit trigger one of these can fire | Kevin Kaminski |
+| ~~Multi-tenant app registration ownership~~ — **assigned: Kevin Kaminski** (D-19). Still to settle at creation: home-tenant choice (irreversible), break-glass recovery, and whether publisher verification is pursued | — | Kevin Kaminski |
 | Live-session behavior when the client quits | Stage 3 session work | Deferred with trigger |
 
 ---
