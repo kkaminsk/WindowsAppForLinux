@@ -82,8 +82,13 @@ These are deliberate, recorded decisions rather than gaps to be discovered later
 
 ## Documentation
 
-- **[spec.md](spec.md)** — the full product and architecture specification. §14 is a **decision register**: 20
-  decisions, each with rationale and a revisit trigger. Start there.
+- **[CTOOverview/overview.md](CTOOverview/overview.md)** — **new to the project? start here.** A plain-language
+  introduction for technical and non-technical stakeholders: what we are building, why the gap exists, and what the
+  five-day sprint does and does not buy.
+- **[spec.md](spec.md)** — the full product and architecture specification, and the authoritative source. §14 is a
+  **decision register**: 20 decisions, each with rationale and a revisit trigger.
+- **[projectmanagement/projectplan.md](projectmanagement/projectplan.md)** — the 5-working-day feasibility sprint:
+  entry conditions, the day-by-day plan, the gates, and the branch point at the end of day 3.
 - **[gapsandrecommendations.md](gapsandrecommendations.md)** — assessment of specification completeness and
   feasibility: 54 findings, what was applied, and the outstanding backlog.
 - **[Native connectivity design](docs/superpowers/specs/2026-08-18-windows365-native-connectivity-design.md)** — the
